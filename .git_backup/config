@@ -1,0 +1,16 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[remote "origin"]
+	url = https://github.com/jyani709/Android-Alarm-App
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "master"]
+	remote = origin
+	merge = refs/heads/master
+[remote "origin1"]
+	url = https://github.com/jyani709/Android-Alarm-App.git
+	fetch = +refs/heads/*:refs/remotes/origin1/*
