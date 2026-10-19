@@ -1,35 +1,192 @@
+
 package com.example.myalarm
 
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.app.TimePickerDialog
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.Switch
-import android.widget.TextView
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import android.app.AlarmManager
-import android.app.PendingIntent
-import android.content.Intent
-import android.os.Build
-import android.provider.Settings
-import android.net.Uri
-import android.widget.Toast
-import org.json.JSONArray
-import org.json.JSONObject
 
 data class AlarmItem(
     val id: Int,
-    val hour: Int,
-    val minute: Int,
-    var enabled: Boolean = true
+    var hour: Int,
+    var minute: Int,
+    var enabled: Boolean = true,
+    val days: MutableSet<Int> = mutableSetOf(
+        Calendar.MONDAY,
+        Calendar.TUESDAY,
+        Calendar.WEDNESDAY,
+        Calendar.THURSDAY,
+        Calendar.FRIDAY,
+        Calendar.SATURDAY,
+        Calendar.SUNDAY
+    )
 )
+
+object AlarmScheduler {
+    private const val PREFS = "MyAlarmPrefs"
+    private const val KEY = "alarms"
+
+    fun load(context: Context): MutableList<AlarmItem> {
+        val result = mutableListOf<AlarmItem>()
+        val json = context.getSharedPreferences(
+            PREFS, Context.MODE_PRIVATE
+        ).getString(KEY, null) ?: return result
+
+        try {
+            val array = JSONArray(json)
+
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val days = mutableSetOf<Int>()
+
+                if (item.has("days")) {
+                    val savedDays = item.getJSONArray("days")
+                    for (j in 0 until savedDays.length()) {
+                        days.add(savedDays.getInt(j))
+                    }
+                } else {
+                    days.addAll(
+                        listOf(
+                            Calendar.MONDAY, Calendar.TUESDAY,
+                            Calendar.WEDNESDAY, Calendar.THURSDAY,
+                            Calendar.FRIDAY, Calendar.SATURDAY,
+                            Calendar.SUNDAY
+                        )
+                    )
+                }
+
+                result.add(
+                    AlarmItem(
+                        item.getInt("id"),
+                        item.getInt("hour"),
+                        item.getInt("minute"),
+                        item.optBoolean("enabled", true),
+                        days
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        return result
+    }
+
+    fun save(context: Context, alarms: List<AlarmItem>) {
+        val array = JSONArray()
+
+        for (alarm in alarms) {
+            val daysArray = JSONArray()
+            alarm.days.sorted().forEach { daysArray.put(it) }
+
+            array.put(
+                JSONObject().apply {
+                    put("id", alarm.id)
+                    put("hour", alarm.hour)
+                    put("minute", alarm.minute)
+                    put("enabled", alarm.enabled)
+                    put("days", daysArray)
+                }
+            )
+        }
+
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY, array.toString())
+            .apply()
+    }
+
+    fun cancel(context: Context, alarm: AlarmItem) {
+        val intent = Intent(context, AlarmReceiver::class.java)
+
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            alarm.id,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                    PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val manager = context.getSystemService(
+            Context.ALARM_SERVICE
+        ) as AlarmManager
+
+        manager.cancel(pendingIntent)
+        pendingIntent.cancel()
+    }
+
+    fun scheduleNext(context: Context, alarm: AlarmItem) {
+        cancel(context, alarm)
+
+        if (!alarm.enabled || alarm.days.isEmpty()) return
+
+        val manager = context.getSystemService(
+            Context.ALARM_SERVICE
+        ) as AlarmManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            !manager.canScheduleExactAlarms()
+        ) return
+
+        val now = Calendar.getInstance()
+        var nextTime: Calendar? = null
+
+        for (offset in 0..7) {
+            val candidate = Calendar.getInstance().apply {
+                add(Calendar.DAY_OF_YEAR, offset)
+                set(Calendar.HOUR_OF_DAY, alarm.hour)
+                set(Calendar.MINUTE, alarm.minute)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }
+
+            if (candidate.get(Calendar.DAY_OF_WEEK) in alarm.days &&
+                candidate.timeInMillis > now.timeInMillis
+            ) {
+                nextTime = candidate
+                break
+            }
+        }
+
+        val time = nextTime ?: return
+
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            putExtra("alarmId", alarm.id)
+        }
+
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            alarm.id,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                    PendingIntent.FLAG_IMMUTABLE
+        )
+
+        manager.setExactAndAllowWhileIdle(
+            AlarmManager.RTC_WAKEUP,
+            time.timeInMillis,
+            pendingIntent
+        )
+    }
+
+    fun scheduleAll(context: Context) {
+        load(context).forEach { scheduleNext(context, it) }
+    }
+}
 
 class MainActivity : AppCompatActivity() {
 
@@ -37,55 +194,24 @@ class MainActivity : AppCompatActivity() {
     private lateinit var alarmList: LinearLayout
     private val alarms = mutableListOf<AlarmItem>()
     private var nextId = 1
-    private fun saveAlarms() {
-        val jsonArray = JSONArray()
 
-        for (alarm in alarms) {
-            val jsonObject = JSONObject().apply {
-                put("id", alarm.id)
-                put("hour", alarm.hour)
-                put("minute", alarm.minute)
-                put("enabled", alarm.enabled)
-            }
+    private val dayNames = arrayOf(
+        "월", "화", "수", "목", "금", "토", "일"
+    )
 
-            jsonArray.put(jsonObject)
-        }
+    private val dayValues = intArrayOf(
+        Calendar.MONDAY,
+        Calendar.TUESDAY,
+        Calendar.WEDNESDAY,
+        Calendar.THURSDAY,
+        Calendar.FRIDAY,
+        Calendar.SATURDAY,
+        Calendar.SUNDAY
+    )
 
-        getSharedPreferences("MyAlarmPrefs", MODE_PRIVATE)
-            .edit()
-            .putString("alarms", jsonArray.toString())
-            .apply()
-    }
-    private fun loadAlarms() {
-        val json = getSharedPreferences(
-            "MyAlarmPrefs",
-            MODE_PRIVATE
-        ).getString("alarms", null) ?: return
-
-        val jsonArray = JSONArray(json)
-
-        alarms.clear()
-        var maxId = 0
-
-        for (i in 0 until jsonArray.length()) {
-            val item = jsonArray.getJSONObject(i)
-
-            val alarm = AlarmItem(
-                id = item.getInt("id"),
-                hour = item.getInt("hour"),
-                minute = item.getInt("minute"),
-                enabled = item.getBoolean("enabled")
-            )
-
-            alarms.add(alarm)
-            maxId = maxOf(maxId, alarm.id)
-        }
-
-        nextId = maxId + 1
-        renderAlarms()
-    }
-
-    private val handler = Handler(Looper.getMainLooper())
+    private val handler = android.os.Handler(
+        android.os.Looper.getMainLooper()
+    )
 
     private val clockRunnable = object : Runnable {
         override fun run() {
@@ -108,45 +234,137 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.titleText).text = "나의 알람"
 
         findViewById<Button>(R.id.addAlarmButton)
-            .setOnClickListener {
-                showTimePicker()
-            }
+            .setOnClickListener { showTimePicker() }
 
         loadAlarms()
-
         handler.post(clockRunnable)
     }
 
-    private fun showTimePicker() {
+    override fun onResume() {
+        super.onResume()
+
+        if (::alarmList.isInitialized) {
+            AlarmScheduler.scheduleAll(this)
+        }
+    }
+
+    private fun loadAlarms() {
+        alarms.clear()
+        alarms.addAll(AlarmScheduler.load(this))
+        nextId = (alarms.maxOfOrNull { it.id } ?: 0) + 1
+        renderAlarms()
+    }
+
+    private fun showTimePicker(alarm: AlarmItem? = null) {
         val now = Calendar.getInstance()
 
         TimePickerDialog(
             this,
             { _, hour, minute ->
-                val alarm = AlarmItem(
-                    id = nextId++,
-                    hour = hour,
-                    minute = minute
-                )
-
-                alarms.add(alarm)
-                saveAlarms()
-                renderAlarms()
-                scheduleAlarm(alarm)
+                showDayPicker(hour, minute, alarm)
             },
-            now.get(Calendar.HOUR_OF_DAY),
-            now.get(Calendar.MINUTE),
+            alarm?.hour ?: now.get(Calendar.HOUR_OF_DAY),
+            alarm?.minute ?: now.get(Calendar.MINUTE),
             true
         ).show()
     }
-    private fun scheduleAlarm(alarm: AlarmItem) {
-        val alarmManager = getSystemService(
-            ALARM_SERVICE
+
+    private fun showDayPicker(
+        hour: Int,
+        minute: Int,
+        alarm: AlarmItem? = null
+    ) {
+        val selected = BooleanArray(7) { index ->
+            if (alarm == null) {
+                true
+            } else {
+                dayValues[index] in alarm.days
+            }
+        }
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle(
+                if (alarm == null) "반복할 요일 선택"
+                else "알람 수정 - 반복할 요일"
+            )
+            .setMultiChoiceItems(
+                dayNames, selected
+            ) { _, which, checked ->
+                selected[which] = checked
+            }
+            .setPositiveButton("저장") { _, _ ->
+                val days = mutableSetOf<Int>()
+
+                for (i in selected.indices) {
+                    if (selected[i]) days.add(dayValues[i])
+                }
+
+                if (days.isEmpty()) {
+                    Toast.makeText(
+                        this,
+                        "반복할 요일을 하나 이상 선택해 주세요.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setPositiveButton
+                }
+
+                if (alarm == null) {
+                    val newAlarm = AlarmItem(
+                        id = nextId++,
+                        hour = hour,
+                        minute = minute,
+                        days = days
+                    )
+                    alarms.add(newAlarm)
+                } else {
+                    alarm.hour = hour
+                    alarm.minute = minute
+                    alarm.days.clear()
+                    alarm.days.addAll(days)
+                }
+
+                AlarmScheduler.save(this, alarms)
+                renderAlarms()
+                requestPermissionAndSchedule()
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun deleteAlarm(alarm: AlarmItem) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("알람 삭제")
+            .setMessage(
+                String.format(
+                    Locale.KOREA,
+                    "%02d:%02d 알람을 삭제할까요?",
+                    alarm.hour,
+                    alarm.minute
+                )
+            )
+            .setPositiveButton("삭제") { _, _ ->
+                AlarmScheduler.cancel(this, alarm)
+                alarms.removeAll { it.id == alarm.id }
+                AlarmScheduler.save(this, alarms)
+                renderAlarms()
+
+                Toast.makeText(
+                    this,
+                    "알람이 삭제되었습니다.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun requestPermissionAndSchedule() {
+        val manager = getSystemService(
+            Context.ALARM_SERVICE
         ) as AlarmManager
 
-        // Android 12 이상에서는 정확한 알람 권한을 확인
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            !alarmManager.canScheduleExactAlarms()
+            !manager.canScheduleExactAlarms()
         ) {
             Toast.makeText(
                 this,
@@ -162,39 +380,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 선택한 시각을 오늘 또는 내일의 시각으로 계산
-        val calendar = java.util.Calendar.getInstance().apply {
-            set(java.util.Calendar.HOUR_OF_DAY, alarm.hour)
-            set(java.util.Calendar.MINUTE, alarm.minute)
-            set(java.util.Calendar.SECOND, 0)
-            set(java.util.Calendar.MILLISECOND, 0)
-
-            if (timeInMillis <= System.currentTimeMillis()) {
-                add(java.util.Calendar.DAY_OF_YEAR, 1)
-            }
-        }
-
-        val intent = Intent(this, AlarmReceiver::class.java).apply {
-            putExtra("alarmId", alarm.id)
-        }
-
-        val pendingIntent = PendingIntent.getBroadcast(
-            this,
-            alarm.id,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or
-                    PendingIntent.FLAG_IMMUTABLE
-        )
-
-        alarmManager.setExactAndAllowWhileIdle(
-            AlarmManager.RTC_WAKEUP,
-            calendar.timeInMillis,
-            pendingIntent
-        )
+        AlarmScheduler.scheduleAll(this)
 
         Toast.makeText(
             this,
-            "알람이 예약되었습니다.",
+            "알람이 저장되고 예약되었습니다.",
             Toast.LENGTH_SHORT
         ).show()
     }
@@ -206,7 +396,7 @@ class MainActivity : AppCompatActivity() {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(12, 12, 12, 12)
+                setPadding(8, 12, 8, 12)
             }
 
             val info = LinearLayout(this).apply {
@@ -223,8 +413,12 @@ class MainActivity : AppCompatActivity() {
                 textSize = 28f
             }
 
+            val selectedDays = dayNames.filterIndexed { index, _ ->
+                dayValues[index] in alarm.days
+            }.joinToString(" ")
+
             val description = TextView(this).apply {
-                text = "알람 ${alarm.id}"
+                text = "알람 ${alarm.id} · $selectedDays"
                 textSize = 14f
             }
 
@@ -237,16 +431,43 @@ class MainActivity : AppCompatActivity() {
 
                 setOnCheckedChangeListener { _, checked ->
                     alarm.enabled = checked
-                    saveAlarms()
+                    AlarmScheduler.save(this@MainActivity, alarms)
+
+                    if (checked) {
+                        requestPermissionAndSchedule()
+                    } else {
+                        AlarmScheduler.cancel(
+                            this@MainActivity, alarm
+                        )
+                    }
                 }
             }
+
+            val editButton = Button(this).apply {
+                text = "수정"
+                setOnClickListener {
+                    showTimePicker(alarm)
+                }
+            }
+
+            val deleteButton = Button(this).apply {
+                text = "삭제"
+                setOnClickListener {
+                    deleteAlarm(alarm)
+                }
+            }
+
             row.addView(
                 info,
-                LinearLayout.LayoutParams(0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
             )
-
             row.addView(toggle)
+            row.addView(editButton)
+            row.addView(deleteButton)
 
             alarmList.addView(row)
         }

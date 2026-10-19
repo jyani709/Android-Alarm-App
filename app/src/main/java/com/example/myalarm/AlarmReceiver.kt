@@ -12,17 +12,23 @@ import androidx.core.app.NotificationCompat
 class AlarmReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
+        val alarmId = intent.getIntExtra("alarmId", 0)
         val manager = context.getSystemService(
             Context.NOTIFICATION_SERVICE
         ) as NotificationManager
 
-        val alarmId = intent.getIntExtra("alarmId", 0)
-
-        // 알람 끄기 버튼을 눌렀을 경우
         if (intent.action == ACTION_STOP) {
             AlarmSoundManager.stop()
             manager.cancel(alarmId)
             return
+        }
+
+        // 알람을 울린 뒤 다음 선택 요일의 알람 예약
+        val alarms = AlarmScheduler.load(context)
+        val alarm = alarms.find { it.id == alarmId }
+
+        if (alarm != null && alarm.enabled) {
+            AlarmScheduler.scheduleNext(context, alarm)
         }
 
         val channelId = "my_alarm_channel"
@@ -32,16 +38,19 @@ class AlarmReceiver : BroadcastReceiver() {
                 channelId,
                 "알람",
                 NotificationManager.IMPORTANCE_HIGH
-            )
-            channel.description = "알람 시간 알림"
+            ).apply {
+                description = "알람 시간 알림"
+            }
+
             manager.createNotificationChannel(channel)
         }
 
-        // 알람 소리 재생
         AlarmSoundManager.play(context)
 
-        // 알람 끄기 버튼의 실행 동작
-        val stopIntent = Intent(context, AlarmReceiver::class.java).apply {
+        val stopIntent = Intent(
+            context,
+            AlarmReceiver::class.java
+        ).apply {
             action = ACTION_STOP
             putExtra("alarmId", alarmId)
         }
