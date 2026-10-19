@@ -1,4 +1,3 @@
-
 package com.example.myalarm
 
 import android.app.AlarmManager
@@ -19,6 +18,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 data class AlarmItem(
     val id: Int,
@@ -39,6 +39,18 @@ data class AlarmItem(
 object AlarmScheduler {
     private const val PREFS = "MyAlarmPrefs"
     private const val KEY = "alarms"
+    val koreaTimeZone: TimeZone = TimeZone.getTimeZone("Asia/Seoul")
+
+    // 24시간(0~23)을 "오전/오후 hh:mm" 문자열로 변환하는 도우미 함수
+    fun formatAmPm(hour: Int, minute: Int): String {
+        val amPm = if (hour < 12) "오전" else "오후"
+        val displayHour = when {
+            hour == 0 -> 12
+            hour > 12 -> hour - 12
+            else -> hour
+        }
+        return String.format(Locale.KOREA, "%s %02d:%02d", amPm, displayHour, minute)
+    }
 
     fun load(context: Context): MutableList<AlarmItem> {
         val result = mutableListOf<AlarmItem>()
@@ -142,11 +154,11 @@ object AlarmScheduler {
             !manager.canScheduleExactAlarms()
         ) return
 
-        val now = Calendar.getInstance()
+        val now = Calendar.getInstance(koreaTimeZone)
         var nextTime: Calendar? = null
 
         for (offset in 0..7) {
-            val candidate = Calendar.getInstance().apply {
+            val candidate = Calendar.getInstance(koreaTimeZone).apply {
                 add(Calendar.DAY_OF_YEAR, offset)
                 set(Calendar.HOUR_OF_DAY, alarm.hour)
                 set(Calendar.MINUTE, alarm.minute)
@@ -215,10 +227,13 @@ class MainActivity : AppCompatActivity() {
 
     private val clockRunnable = object : Runnable {
         override fun run() {
-            timeText.text = SimpleDateFormat(
-                "yyyy년 MM월 dd일 HH:mm:ss",
+            val sdf = SimpleDateFormat(
+                "yyyy년 MM월 dd일 a hh:mm:ss",
                 Locale.KOREA
-            ).format(Date())
+            ).apply {
+                timeZone = AlarmScheduler.koreaTimeZone
+            }
+            timeText.text = sdf.format(Date())
 
             handler.postDelayed(this, 1000)
         }
@@ -226,6 +241,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 앱 기본 시간대를 한국 시간으로 고정
+        TimeZone.setDefault(AlarmScheduler.koreaTimeZone)
         setContentView(R.layout.activity_main)
 
         timeText = findViewById(R.id.timeText)
@@ -256,8 +273,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showTimePicker(alarm: AlarmItem? = null) {
-        val now = Calendar.getInstance()
+        val now = Calendar.getInstance(AlarmScheduler.koreaTimeZone)
 
+        // 마지막 파라미터를 false로 설정하여 AM/PM(오전/오후) 선택 모드로 표시
         TimePickerDialog(
             this,
             { _, hour, minute ->
@@ -265,7 +283,7 @@ class MainActivity : AppCompatActivity() {
             },
             alarm?.hour ?: now.get(Calendar.HOUR_OF_DAY),
             alarm?.minute ?: now.get(Calendar.MINUTE),
-            true
+            false
         ).show()
     }
 
@@ -335,12 +353,7 @@ class MainActivity : AppCompatActivity() {
         android.app.AlertDialog.Builder(this)
             .setTitle("알람 삭제")
             .setMessage(
-                String.format(
-                    Locale.KOREA,
-                    "%02d:%02d 알람을 삭제할까요?",
-                    alarm.hour,
-                    alarm.minute
-                )
+                "${AlarmScheduler.formatAmPm(alarm.hour, alarm.minute)} 알람을 삭제할까요?"
             )
             .setPositiveButton("삭제") { _, _ ->
                 AlarmScheduler.cancel(this, alarm)
@@ -404,13 +417,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             val timeLabel = TextView(this).apply {
-                text = String.format(
-                    Locale.KOREA,
-                    "%02d:%02d",
-                    alarm.hour,
-                    alarm.minute
-                )
-                textSize = 28f
+                text = AlarmScheduler.formatAmPm(alarm.hour, alarm.minute)
+                textSize = 24f
             }
 
             val selectedDays = dayNames.filterIndexed { index, _ ->
